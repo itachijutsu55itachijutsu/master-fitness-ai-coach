@@ -108,9 +108,10 @@ function validateWorkoutPlan(plan: any) {
 
 // validate diet plan to ensure it strictly follows schema
 function validateDietPlan(plan: any) {
-  // only keep the fields we want
   const validatedPlan = {
-    dailyCalories: plan.dailyCalories,
+    dailyCalories: typeof plan.dailyCalories === "number"
+      ? plan.dailyCalories
+      : parseInt(plan.dailyCalories) || 2000,
     meals: plan.meals.map((meal: any) => ({
       name: meal.name,
       foods: meal.foods,
@@ -126,8 +127,43 @@ http.route({
     try {
       const payload = await request.json();
 
+      // ✅ FIX 1: Log the full payload so you can see exactly what Vapi sends
+      console.log("=== VAPI WEBHOOK RECEIVED ===");
+      console.log("Full payload:", JSON.stringify(payload, null, 2));
+
+      // ✅ FIX 2: Try every possible location Vapi might send user_id
+      // Vapi workflows can nest variables differently depending on configuration
+      const user_id =
+        payload.user_id ||
+        payload.message?.call?.metadata?.user_id ||
+        payload.call?.metadata?.user_id ||
+        payload.data?.user_id ||
+        payload.variableValues?.user_id ||
+        payload.message?.artifact?.variableValues?.user_id ||
+        null;
+
+      console.log("Resolved user_id:", user_id);
+
+      // ✅ FIX 3: Return early with a clear error if user_id is missing
+      // This prevents saving an orphaned plan that no user can ever see
+      if (!user_id) {
+        console.error(
+          "CRITICAL: user_id is missing from Vapi payload. Check your Vapi workflow variable configuration. Full payload was logged above."
+        );
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error:
+              "Missing user_id. Make sure your Vapi workflow passes user_id as a variable.",
+          }),
+          {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+
       const {
-        user_id,
         age,
         height,
         weight,
@@ -138,12 +174,22 @@ http.route({
         dietary_restrictions,
       } = payload;
 
-      console.log("Payload is here:", payload);
+      // ✅ FIX 4: Log all extracted fields to catch any missing values
+      console.log("Extracted fields:", {
+        age,
+        height,
+        weight,
+        injuries,
+        workout_days,
+        fitness_goal,
+        fitness_level,
+        dietary_restrictions,
+      });
 
       const model = genAI.getGenerativeModel({
         model: "gemini-2.0-flash-001",
         generationConfig: {
-          temperature: 0.4, // lower temperature for more predictable outputs
+          temperature: 0.4,
           topP: 0.9,
           responseMimeType: "application/json",
         },
@@ -192,12 +238,14 @@ http.route({
       
       DO NOT add any fields that are not in this example. Your response must be a valid JSON object with no additional text.`;
 
+      console.log("Calling Gemini for workout plan...");
       const workoutResult = await model.generateContent(workoutPrompt);
       const workoutPlanText = workoutResult.response.text();
+      console.log("Gemini workout response:", workoutPlanText);
 
-      // VALIDATE THE INPUT COMING FROM AI
       let workoutPlan = JSON.parse(workoutPlanText);
       workoutPlan = validateWorkoutPlan(workoutPlan);
+      console.log("Validated workout plan:", JSON.stringify(workoutPlan));
 
       const dietPrompt = `You are an experienced nutrition coach creating a personalized diet plan based on:
         Age: ${age}
@@ -236,14 +284,17 @@ http.route({
         
         DO NOT add any fields that are not in this example. Your response must be a valid JSON object with no additional text.`;
 
+      console.log("Calling Gemini for diet plan...");
       const dietResult = await model.generateContent(dietPrompt);
       const dietPlanText = dietResult.response.text();
+      console.log("Gemini diet response:", dietPlanText);
 
-      // VALIDATE THE INPUT COMING FROM AI
       let dietPlan = JSON.parse(dietPlanText);
       dietPlan = validateDietPlan(dietPlan);
+      console.log("Validated diet plan:", JSON.stringify(dietPlan));
 
-      // save to our DB: CONVEX
+      // ✅ FIX 5: Save plan with the resolved user_id and log the result
+      console.log("Saving plan to Convex for userId:", user_id);
       const planId = await ctx.runMutation(api.plans.createPlan, {
         userId: user_id,
         dietPlan,
@@ -251,6 +302,8 @@ http.route({
         workoutPlan,
         name: `${fitness_goal} Plan - ${new Date().toLocaleDateString()}`,
       });
+
+      console.log("✅ Plan saved successfully! planId:", planId);
 
       return new Response(
         JSON.stringify({
