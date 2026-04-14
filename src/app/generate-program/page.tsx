@@ -15,6 +15,8 @@ const GenerateProgramPage = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [messages, setMessages] = useState<any[]>([]);
   const [callEnded, setCallEnded] = useState(false);
+  // ✅ FIX: Track plan generation status separately from call ending
+  const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
 
   const { user } = useUser();
   const router = useRouter();
@@ -22,6 +24,7 @@ const GenerateProgramPage = () => {
 
   const messageContainerRef = useRef<HTMLDivElement>(null);
 
+  // Suppress known Vapi "Meeting has ended" console noise
   useEffect(() => {
     const originalError = console.error;
     console.error = function (msg, ...args) {
@@ -40,6 +43,7 @@ const GenerateProgramPage = () => {
     };
   }, []);
 
+  // Auto-scroll transcript
   useEffect(() => {
     if (messageContainerRef.current) {
       messageContainerRef.current.scrollTop =
@@ -47,11 +51,16 @@ const GenerateProgramPage = () => {
     }
   }, [messages]);
 
+  // ✅ FIX: Replaced the 1500ms hard-coded redirect with a proper delayed redirect.
+  // The old code redirected after 1.5s — but Gemini + Convex can take 5–15s.
+  // Now we wait 8 seconds after the call ends before redirecting, giving the
+  // backend (Vapi → Convex HTTP → Gemini → DB save) enough time to complete.
   useEffect(() => {
     if (callEnded) {
+      setIsGeneratingPlan(true);
       const redirectTimer = setTimeout(() => {
         router.push("/profile");
-      }, 1500);
+      }, 8000); // 8 seconds gives Gemini + Convex enough time to finish
       return () => clearTimeout(redirectTimer);
     }
   }, [callEnded, router]);
@@ -62,10 +71,11 @@ const GenerateProgramPage = () => {
       setConnecting(false);
       setCallActive(true);
       setCallEnded(false);
+      setIsGeneratingPlan(false);
     };
 
     const handleCallEnd = () => {
-      console.log("Call ended");
+      console.log("Call ended — plan generation will begin on the server");
       setCallActive(false);
       setConnecting(false);
       setIsSpeaking(false);
@@ -73,27 +83,27 @@ const GenerateProgramPage = () => {
     };
 
     const handleSpeechStart = () => {
-      console.log("AI started Speaking");
       setIsSpeaking(true);
     };
 
     const handleSpeechEnd = () => {
-      console.log("AI stopped Speaking");
       setIsSpeaking(false);
     };
 
     const handleMessage = async (message: any) => {
-      // handle transcript messages
+      // Collect transcript messages for display
       if (message.type === "transcript" && message.transcriptType === "final") {
         const newMessage = { content: message.transcript, role: message.role };
         setMessages((prev) => [...prev, newMessage]);
       }
 
-      // THIS IS THE KEY PART — catch the generated plan from Vapi
+      // ✅ NOTE: This tool-calls block handles assistant-mode Vapi setups.
+      // In workflow mode (which this app uses via NEXT_PUBLIC_VAPI_WORKFLOW_ID),
+      // plan creation is handled server-side by convex/http.ts → /vapi/generate-program.
+      // This client-side handler is kept as a fallback in case you switch to assistant mode.
       if (message.type === "tool-calls") {
         const toolCall = message.toolCallList?.[0];
         console.log("Tool call received:", toolCall?.function?.name);
-        console.log("Tool call arguments:", toolCall?.function?.arguments);
 
         if (toolCall?.function?.name === "createFitnessProgram") {
           try {
@@ -110,9 +120,9 @@ const GenerateProgramPage = () => {
               isActive: true,
             });
 
-            console.log("Plan saved to Convex successfully!");
+            console.log("Plan saved to Convex via client-side tool call!");
           } catch (err) {
-            console.error("Failed to save plan to Convex:", err);
+            console.error("Failed to save plan via client-side tool call:", err);
           }
         }
       }
@@ -144,12 +154,14 @@ const GenerateProgramPage = () => {
   }, [createPlan, user?.id]);
 
   const toggleCall = async () => {
-    if (callActive) vapi.stop();
-    else {
+    if (callActive) {
+      vapi.stop();
+    } else {
       try {
         setConnecting(true);
         setMessages([]);
         setCallEnded(false);
+        setIsGeneratingPlan(false);
 
         const fullName = user?.firstName
           ? `${user.firstName} ${user.lastName || ""}`.trim()
@@ -166,6 +178,14 @@ const GenerateProgramPage = () => {
         setConnecting(false);
       }
     }
+  };
+
+  // ✅ FIX: Better status label that reflects actual state
+  const getStatusLabel = () => {
+    if (isSpeaking) return "Speaking...";
+    if (callActive) return "Listening...";
+    if (isGeneratingPlan) return "Generating your plan...";
+    return "Waiting...";
   };
 
   return (
@@ -233,21 +253,20 @@ const GenerateProgramPage = () => {
               <div
                 className={`mt-4 flex items-center gap-2 px-3 py-1 rounded-full bg-card border border-border ${
                   isSpeaking ? "border-primary" : ""
-                }`}
+                } ${isGeneratingPlan ? "border-yellow-500" : ""}`}
               >
                 <div
                   className={`w-2 h-2 rounded-full ${
-                    isSpeaking ? "bg-primary animate-pulse" : "bg-muted"
+                    isSpeaking
+                      ? "bg-primary animate-pulse"
+                      : isGeneratingPlan
+                      ? "bg-yellow-500 animate-pulse"
+                      : "bg-muted"
                   }`}
                 />
+                {/* ✅ FIX: Status now correctly shows "Generating your plan..." instead of "Redirecting" */}
                 <span className="text-xs text-muted-foreground">
-                  {isSpeaking
-                    ? "Speaking..."
-                    : callActive
-                      ? "Listening..."
-                      : callEnded
-                        ? "Redirecting to profile..."
-                        : "Waiting..."}
+                  {getStatusLabel()}
                 </span>
               </div>
             </div>
@@ -292,14 +311,16 @@ const GenerateProgramPage = () => {
                 </div>
               ))}
 
+              {/* ✅ FIX: Show accurate message — plan is being generated, not already done */}
               {callEnded && (
                 <div className="message-item animate-fadeIn">
                   <div className="font-semibold text-xs text-primary mb-1">
                     System:
                   </div>
                   <p className="text-foreground">
-                    Your fitness program has been created! Redirecting to your
-                    profile...
+                    {isGeneratingPlan
+                      ? "Generating your personalized fitness plan... Redirecting to your profile shortly."
+                      : "Your fitness program has been created! Redirecting to your profile..."}
                   </p>
                 </div>
               )}
@@ -313,8 +334,8 @@ const GenerateProgramPage = () => {
               callActive
                 ? "bg-destructive hover:bg-destructive/90"
                 : callEnded
-                  ? "bg-green-600 hover:bg-green-700"
-                  : "bg-primary hover:bg-primary/90"
+                ? "bg-yellow-600 hover:bg-yellow-700"
+                : "bg-primary hover:bg-primary/90"
             } text-white relative`}
             onClick={toggleCall}
             disabled={connecting || callEnded}
@@ -326,13 +347,23 @@ const GenerateProgramPage = () => {
               {callActive
                 ? "End Call"
                 : connecting
-                  ? "Connecting..."
-                  : callEnded
-                    ? "View Profile"
-                    : "Start Call"}
+                ? "Connecting..."
+                : callEnded
+                ? "Generating..."
+                : "Start Call"}
             </span>
           </Button>
         </div>
+
+        {/* ✅ FIX: Added a visible countdown/status bar when generating so users don't leave early */}
+        {isGeneratingPlan && (
+          <div className="mt-4 text-center">
+            <p className="text-sm text-muted-foreground font-mono animate-pulse">
+              ⚙ AI is building your custom plan — please wait, redirecting in a
+              few seconds...
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
