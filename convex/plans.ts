@@ -13,8 +13,11 @@ export const createPlan = mutation({
           routines: v.array(
             v.object({
               name: v.string(),
-              sets: v.number(),
-              reps: v.number(),
+              // ✅ FIX: Changed from v.number() to v.optional(v.number())
+              // to match the schema.ts definition — previously this mismatch
+              // caused silent save failures whenever Gemini omitted sets/reps
+              sets: v.optional(v.number()),
+              reps: v.optional(v.number()),
             })
           ),
         })
@@ -32,6 +35,7 @@ export const createPlan = mutation({
     isActive: v.boolean(),
   },
   handler: async (ctx, args) => {
+    // Deactivate all existing active plans for this user before creating a new one
     const activePlans = await ctx.db
       .query("plans")
       .withIndex("by_user_id", (q) => q.eq("userId", args.userId))
