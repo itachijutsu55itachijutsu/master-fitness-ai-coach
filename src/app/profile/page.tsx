@@ -19,9 +19,20 @@ import {
 
 const ProfilePage = () => {
   const { user } = useUser();
-  const userId = user?.id as string;
 
-  const allPlans = useQuery(api.plans.getUserPlans, { userId });
+  // ✅ FIX: Don't cast to string — keep as string | undefined
+  // On first render Clerk hasn't loaded yet, so user?.id is undefined.
+  // Passing undefined to Convex caused it to query with no userId and return empty results.
+  const userId = user?.id;
+
+  // ✅ FIX: Pass "skip" when userId is not yet available.
+  // This prevents Convex from running the query with an undefined userId,
+  // which would return zero results and incorrectly show "No Fitness Plan".
+  const allPlans = useQuery(
+    api.plans.getUserPlans,
+    userId ? { userId } : "skip"
+  );
+
   const [selectedPlanId, setSelectedPlanId] = useState<null | string>(null);
 
   const activePlan = allPlans?.find((plan) => plan.isActive);
@@ -29,6 +40,24 @@ const ProfilePage = () => {
   const currentPlan = selectedPlanId
     ? allPlans?.find((plan) => plan._id === selectedPlanId)
     : activePlan;
+
+  // ✅ FIX: Show a loading state while userId or plans are not yet available
+  // Previously this would immediately render "No Fitness Plan" during load
+  if (!userId || allPlans === undefined) {
+    return (
+      <section className="relative z-10 pt-12 pb-32 flex-grow container mx-auto px-4">
+        <ProfileHeader user={user} />
+        <div className="flex items-center justify-center mt-20">
+          <div className="text-center space-y-3">
+            <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
+            <p className="text-muted-foreground font-mono text-sm">
+              Loading your profile...
+            </p>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="relative z-10 pt-12 pb-32 flex-grow container mx-auto px-4">
@@ -72,7 +101,6 @@ const ProfilePage = () => {
           </div>
 
           {/* PLAN DETAILS */}
-
           {currentPlan && (
             <div className="relative backdrop-blur-sm border border-border rounded-lg p-6">
               <CornerElements />
@@ -140,19 +168,19 @@ const ProfilePage = () => {
                                       {routine.name}
                                     </h4>
                                     <div className="flex items-center gap-2">
-                                      <div className="px-2 py-1 rounded bg-primary/20 text-primary text-xs font-mono">
-                                        {routine.sets} SETS
-                                      </div>
-                                      <div className="px-2 py-1 rounded bg-secondary/20 text-secondary text-xs font-mono">
-                                        {routine.reps} REPS
-                                      </div>
+                                      {/* ✅ FIX: Guard against undefined sets/reps (now optional in schema) */}
+                                      {routine.sets !== undefined && (
+                                        <div className="px-2 py-1 rounded bg-primary/20 text-primary text-xs font-mono">
+                                          {routine.sets} SETS
+                                        </div>
+                                      )}
+                                      {routine.reps !== undefined && (
+                                        <div className="px-2 py-1 rounded bg-secondary/20 text-secondary text-xs font-mono">
+                                          {routine.reps} REPS
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
-                                  {routine.description && (
-                                    <p className="text-sm text-muted-foreground mt-1">
-                                      {routine.description}
-                                    </p>
-                                  )}
                                 </div>
                               ))}
                             </div>
@@ -214,4 +242,5 @@ const ProfilePage = () => {
     </section>
   );
 };
+
 export default ProfilePage;
